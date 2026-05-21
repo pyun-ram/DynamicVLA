@@ -7,6 +7,8 @@
 # @Last Modified at: 2025-11-06 09:38:17
 # @Email:  root@haozhexie.com
 
+import os
+
 import isaaclab.sim as sim_utils
 import numpy as np
 import scipy.spatial.transform
@@ -42,6 +44,8 @@ def get_spawner_cfg(
     semantic_tags=None,
 ) -> SpawnerCfg:
     if file_path is not None:
+        if "://" not in file_path:
+            file_path = os.path.abspath(file_path)
         spawner_cfg = UsdFileCfg(
             usd_path=file_path,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
