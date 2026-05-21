@@ -55,28 +55,49 @@ S-Lab, Nanyang Technological University
 
 We recommend using **conda** to create two separate environments:
 
-- one for **model training & inference**
-- one for **Isaac Lab simulation & evaluation**
+- one for **model training & inference** (example name: `dynamicvla-train`)
+- one for **Isaac Lab simulation & evaluation** (created by the official Isaac Lab installer, often named e.g. `isaaclab`)
 
-### PyTorch Environment
+### 1) Training & inference (PyTorch)
 
-- Install **Python 3.10** and **PyTorch 2.7.1** *(Other versions should work, but are not fully tested)*
-- Install dependencies:
+Target: **Python 3.10**, **PyTorch 2.7.1**, and the packages in [`requirements.txt`](requirements.txt) *(other versions may work but are not fully tested)*. `requirements.txt` pins `torch==2.7.1` and `torchvision==0.22.1`.
+
+From the repository root:
+
+```bash
+conda env create -f environment_train.yaml
+conda activate dynamicvla-train
+```
+
+Install PyTorch for your platform and CUDA stack using [PyTorch “Get Started”](https://pytorch.org/get-started/locally/). On Linux, the default PyPI wheels often work (example):
+
+```bash
+pip install torch==2.7.1 torchvision==0.22.1
+```
+
+If you need a specific CUDA wheel index from pytorch.org, use the command shown there for your driver/CUDA version (not every index ships 2.7.1).
+
+Then install the rest of the project dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### Isaac Lab Environment
+If you already satisfied `torch` / `torchvision` with a CUDA wheel, `pip` should usually keep that build when resolving `torch==2.7.1`. If a reinstall pulls the wrong variant, install PyTorch first as above, then run `pip install -r requirements.txt` again and confirm `python -c "import torch; print(torch.version.cuda)"`.
 
-- Install **Python 3.10** *(Other versions should work, but are not fully tested)*
-- Install **Isaac Sim 4.5.0** and **Isaac Lab 2.2.1**
-  Follow the official guide: https://isaac-sim.github.io/IsaacLab/v2.2.0/source/setup/installation/index.html
-- Install additional dependencies:
+### 2) Isaac Lab simulation & evaluation
+
+Target: **Python 3.10**, **Isaac Sim 4.5.0**, and **Isaac Lab 2.2.1**. Prefer the official installer and conda/venv it creates—do not try to reproduce the full stack with a blank `conda create` only, or `isaaclab` may not match your Sim build.
+
+Follow: [Isaac Lab v2.2.0 installation](https://isaac-sim.github.io/IsaacLab/v2.2.0/source/setup/installation/index.html) (use **Isaac Sim 4.5.0** and **Isaac Lab 2.2.1** as in this repo’s changelog). The installer creates or selects a conda environment; its name is defined by that process (commonly `isaaclab` or similar)—use `conda activate <that-name>` before the step below.
+
+After activating that environment, install DynamicVLA’s extra pip dependencies used by `simulations/` and [`scripts/translate_dataset_seq.py`](scripts/translate_dataset_seq.py) (`shapely`, `pyzmq`, `h5py`, `opencv-python-headless`, `PyYAML`, `imageio`, `scipy`, `gymnasium`, `warp-lang`):
 
 ```bash
-pip install shapely pyzmq h5py
+pip install -r requirements-isaac.txt
 ```
+
+If an import still fails, install the missing package manually and avoid versions that conflict with the Isaac Lab bundle.
 
 ## Benchmarking Your Policy 🏅
 

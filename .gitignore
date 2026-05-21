@@ -181,3 +181,9 @@ ipython_config.py
 datasets/
 notebooks/
 runs/
+
+objects
+output
+pretrained_weights/
+scenes
+tests

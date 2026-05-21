@@ -13,8 +13,8 @@ pyzmq
 scipy
 tensorboard
 timm
-torch
-torchvision
+torch==2.7.1
+torchvision==0.22.1
 tqdm
 transformers==5.2.0
 wandb
