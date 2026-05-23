@@ -1,0 +1,18 @@
+# Conda env for model training & inference (PyTorch stack).
+# PyTorch is installed via pip in README so you can match CUDA wheels from pytorch.org.
+#
+# Create:
+#   conda env create -f environment_train.yaml
+# Activate:
+#   conda activate dynamicvla-train
+# Then install PyTorch 2.7.1 (see pytorch.org for CUDA-specific index URLs), e.g.:
+#   pip install torch==2.7.1 torchvision==0.22.1
+# Finally:
+#   pip install -r requirements.txt
+#
+name: dynamicvla-train
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip

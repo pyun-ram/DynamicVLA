@@ -1,0 +1,14 @@
+# Pip extras for DynamicVLA simulation/evaluation on top of the official Isaac Lab environment.
+# Use after Isaac Sim 4.5.0 + Isaac Lab 2.2.1 setup (see README).
+# Do not duplicate torch/isaaclab here; install with:
+#   pip install -r requirements-isaac.txt
+
+shapely
+pyzmq
+h5py
+opencv-python-headless<4.12
+PyYAML
+imageio
+scipy
+gymnasium
+warp-lang
