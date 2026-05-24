@@ -25,15 +25,20 @@ ln -sfn "${ISAACSIM_PATH}" "${ISAACLAB_PATH}/_isaac_sim"
 
 # shellcheck source=/dev/null
 source "${CONDA_DIR}/etc/profile.d/conda.sh"
+# shellcheck source=docker/scripts/conda_prep.sh
+source "$(dirname "${BASH_SOURCE[0]}")/conda_prep.sh"
+conda_accept_tos
 
 if ! conda env list | awk '{print $1}' | grep -qx "${ENV_NAME}"; then
-  conda create -n "${ENV_NAME}" python=3.10 pip -y
+  conda create -n "${ENV_NAME}" python=3.10 pip -y -c conda-forge --override-channels
 fi
 
 conda activate "${ENV_NAME}"
 
 # Isaac Lab 2.2.x extensions (matches manual pip install -e flow when isaaclab.sh -i is unavailable).
-pip install --upgrade "pip<26" "setuptools<81" wheel
+# setuptools>=81 drops pkg_resources; pip isolated builds then fail on sdist deps (e.g. flatdict).
+pip install --upgrade "pip<26" "setuptools>=68,<81" wheel
+pip install flatdict==4.0.1 --no-build-isolation
 for pkg in isaaclab isaaclab_assets isaaclab_tasks; do
   pip install -e "${ISAACLAB_PATH}/source/${pkg}"
 done

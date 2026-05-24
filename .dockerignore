@@ -10,3 +10,5 @@ pretrained_weights/
 *.h5
 agent-transcripts
 .cursor
+# Isaac Sim zip: bind-mounted at build time (docker/vendor/), do not upload in context
+docker/vendor/*.zip

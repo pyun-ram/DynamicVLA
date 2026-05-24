@@ -187,3 +187,5 @@ output
 pretrained_weights/
 scenes
 tests
+docker/empty-vender/
+docker/vendor/
