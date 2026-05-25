@@ -209,7 +209,7 @@ def _set_up_scene_cameras(scene_cfg, cfg):
                     "fps": 1 / v["update_period"],
                     "width": v["width"],
                     "height": v["height"],
-                    "data_types": v["data_types"],
+                    "data_types": list(v["data_types"]) + (["distance_to_image_plane"] if "distance_to_image_plane" not in v["data_types"] else []),
                     "focal_length": v["spawn"]["focal_length"],
                     "focus_distance": v["spawn"]["focus_distance"],
                     "horizontal_aperture": v["spawn"]["horizontal_aperture"],
@@ -315,6 +315,133 @@ def _get_action_tensor(action, num_envs, device):
     return action
 
 
+
+
+
+# Maps camera optical frame to Isaac camera frame (from converter)
+_OPTICAL_TO_ISAAC = np.array([[0., 0., 1.], [-1., 0., 0.], [0., -1., 0.]], dtype=np.float32)
+
+
+
+_OPTICAL_TO_ISAAC = np.array([[0., 0., 1.], [-1., 0., 0.], [0., -1., 0.]], dtype=np.float32)
+
+
+def _get_cam_params_robot_frame(sensors, robot_quat_w, robot_pos_w):
+    # cam-to-robot-root extrinsics, same logic as convert_dynamicvla_to_physmani_raw.py
+    from scipy.spatial.transform import Rotation as R
+    q = robot_quat_w[[1, 2, 3, 0]]
+    R_rb = R.from_quat(q).as_matrix()
+    w2r = np.eye(4)
+    w2r[:3, :3] = R_rb.T
+    w2r[:3, 3]  = -R_rb.T @ robot_pos_w
+    raw = sim.get_camera_params(sensors)
+    cam_params = {}
+    for cam_name in ("opst_cam", "side_cam"):
+        if cam_name not in raw:
+            continue
+        K     = raw[cam_name]["K"][0]
+        pos_w = raw[cam_name]["pos_w"][0]
+        qw    = raw[cam_name]["quat_w"][0]
+        q_c   = qw[[1, 2, 3, 0]]
+        R_c   = R.from_quat(q_c).as_matrix()
+        c2w   = np.eye(4)
+        c2w[:3, :3] = R_c @ _OPTICAL_TO_ISAAC
+        c2w[:3, 3]  = pos_w
+        cam_params[cam_name] = {
+            "K":       K,
+            "E_robot": (w2r @ c2w).astype(np.float32),
+            "near":    0.01,
+            "far":     4.5,
+        }
+    return cam_params
+
+
+_PLY_SAVE_STEPS = {0, 10, 20}
+_PLY_SAVE_DIR   = "/home/pyun/Docker/DynamicVLA/Code/DynamicVLA/debug_ply"
+
+def _write_ply(path, pts, cols):
+    with open(path, "w") as fh:
+        fh.write("ply\nformat ascii 1.0\n")
+        fh.write("element vertex %d\n" % len(pts))
+        fh.write("property float x\nproperty float y\nproperty float z\n")
+        fh.write("property uchar red\nproperty uchar green\nproperty uchar blue\n")
+        fh.write("end_header\n")
+        for p, c in zip(pts, cols):
+            fh.write("%.5f %.5f %.5f %d %d %d\n" % (p[0],p[1],p[2],c[0],c[1],c[2]))
+
+def _save_server_ply(cam_view, curr_state, cam_params, step):
+    """Save server-side single-cam + merged PLY: stride=4, opst_cam (RGB) + side_cam (cyan) + EE."""
+    import os
+    os.makedirs(_PLY_SAVE_DIR, exist_ok=True)
+
+    ee = np.array(curr_state["end_effector"]["pos"].cpu().numpy()).flatten()
+    stride = 4
+    per_cam_pts  = {}
+    per_cam_cols = {}
+    all_pts, all_cols = [], []
+
+    for cam in ("opst_cam", "side_cam"):
+        if cam not in cam_view or "depth" not in cam_view[cam] or cam not in cam_params:
+            continue
+        depth = np.array(cam_view[cam]["depth"], dtype=np.float32).squeeze()
+        rgb   = np.array(cam_view[cam]["rgb"],   dtype=np.uint8).squeeze()
+        if rgb.ndim == 3 and rgb.shape[2] == 4:
+            rgb = rgb[..., :3]
+        K = cam_params[cam]["K"]
+        E = cam_params[cam]["E_robot"].astype(np.float64)
+        depth = np.clip(np.nan_to_num(depth, nan=4.5, posinf=4.5), 0.01, 4.5)
+        H, W = depth.shape
+        v_g, u_g = np.meshgrid(np.arange(H), np.arange(W), indexing="ij")
+        fx, fy, cx, cy = float(K[0,0]), float(K[1,1]), float(K[0,2]), float(K[1,2])
+        p_cam   = np.stack([(u_g-cx)/fx*depth, (v_g-cy)/fy*depth, depth], axis=-1)
+        p_robot = p_cam @ E[:3, :3].T + E[:3, 3]
+        pts  = p_robot[::stride, ::stride].reshape(-1, 3)
+        valid = np.isfinite(pts).all(1) & (pts[:,2] > -0.2) & (pts[:,2] < 3.0)
+        pts  = pts[valid]
+        if cam == "opst_cam":
+            cols = rgb[::stride, ::stride].reshape(-1, 3).astype(np.uint8)[valid]
+        else:
+            cols = np.zeros((len(pts), 3), dtype=np.uint8)
+            cols[:, 0] = 51; cols[:, 2] = 230
+        per_cam_pts[cam]  = pts
+        per_cam_cols[cam] = cols
+        all_pts.append(pts); all_cols.append(cols)
+
+    # EE sphere + axes
+    rng = np.random.default_rng(0)
+    phi = rng.uniform(0, np.pi, 300); th = rng.uniform(0, 2*np.pi, 300); r = 0.015
+    sph = np.column_stack([ee[0]+r*np.sin(phi)*np.cos(th),
+                           ee[1]+r*np.sin(phi)*np.sin(th), ee[2]+r*np.cos(phi)])
+    sph_c = np.zeros((300,3), dtype=np.uint8); sph_c[:,:2] = 255
+    ee_pts  = [sph]
+    ee_cols = [sph_c]
+    for ai, col in enumerate([(255,0,0),(0,255,0),(0,0,255)]):
+        ap = np.tile(ee, (40,1)); ap[:,ai] += np.linspace(0, 0.05, 40)
+        ee_pts.append(ap); ee_cols.append(np.tile(col,(40,1)).astype(np.uint8))
+
+    import logging as _log
+    lg = _log.getLogger(__name__)
+
+    # Save single-cam PLY
+    for cam, cname in (("opst_cam","opst"), ("side_cam","side")):
+        if cam not in per_cam_pts:
+            continue
+        p = np.concatenate([per_cam_pts[cam]] + ee_pts, 0)
+        c = np.concatenate([per_cam_cols[cam]] + ee_cols, 0)
+        path = os.path.join(_PLY_SAVE_DIR, "server_%s_step%04d.ply" % (cname, step))
+        _write_ply(path, p, c)
+        lg.info("[PLY] single-%s  pts=%d" % (cname, len(p)))
+
+    # Save merged PLY
+    if not all_pts:
+        return
+    pts_m  = np.concatenate(all_pts + ee_pts,  0)
+    cols_m = np.concatenate(all_cols + ee_cols, 0)
+    ply_path = os.path.join(_PLY_SAVE_DIR, "server_merged_step%04d.ply" % step)
+    _write_ply(ply_path, pts_m, cols_m)
+    lg.info("[PLY] merged  pts=%d  EE=(%.3f,%.3f,%.3f)" % (len(pts_m), ee[0],ee[1],ee[2]))
+
+
 def simulate(env, obs_socket, act_socket, init_poses):
     import configs.robot_cfg
     import configs.termination_cfg
@@ -327,9 +454,14 @@ def simulate(env, obs_socket, act_socket, init_poses):
     done_term = configs.termination_cfg.get_done_term(term_mgr.active_terms)
     tick = time.perf_counter()
     step_time = None
+    cam_params = _get_cam_params_robot_frame(
+        env.unwrapped.scene.sensors,
+        env.unwrapped.scene["robot"].data.root_quat_w[0].cpu().numpy(),
+        env.unwrapped.scene["robot"].data.root_pos_w[0].cpu().numpy(),
+    )
     while sim_results["status"] == -1:
         # scene_state = env.unwrapped.scene.state
-        cam_view = sim.get_camera_views(env.unwrapped.scene.sensors, ["rgb"])
+        cam_view = sim.get_camera_views(env.unwrapped.scene.sensors, ["rgb", "depth"])
         curr_state = sim.get_curr_state(
             ee_state=env.unwrapped.scene["ee_frame"].data,
             # robot_joint_pos=scene_state["articulation"]["robot"]["joint_position"],
@@ -340,6 +472,9 @@ def simulate(env, obs_socket, act_socket, init_poses):
         )
         sim_results["cam_views"].append(cam_view)
         sim_results["ee_path"].append(curr_state["end_effector"]["pos"].cpu().numpy())
+        _step = len(sim_results["cam_views"]) - 1
+        if _step in _PLY_SAVE_STEPS:
+            _save_server_ply(cam_view, curr_state, cam_params, _step)
         obs_socket.send_pyobj(
             {
                 "dt_scale": (
@@ -353,6 +488,9 @@ def simulate(env, obs_socket, act_socket, init_poses):
                     }
                 },
                 **{"observation.images.%s" % k: v["rgb"] for k, v in cam_view.items()},
+                **{"observation.depths.%s" % k: v["depth"][..., 0]
+                   for k, v in cam_view.items() if "depth" in v},
+                "camera_params": cam_params,
             }
         )
 

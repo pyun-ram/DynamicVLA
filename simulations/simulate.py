@@ -125,9 +125,7 @@ def get_env_cfg(sim_cfg, task, robot, object_metadata, scene_dir):
         scene = random.choice(scenes)
         usd_file = os.path.join(scene_dir, scene)
         logging.info("Loading scene from %s", usd_file)
-        env_cfg.scene = configs.scene_cfg.set_house_asset(
-            env_cfg.scene, os.path.join(scene_dir, usd_file)
-        )
+        env_cfg.scene = configs.scene_cfg.set_house_asset(env_cfg.scene, usd_file)
         tables = configs.scene_cfg.get_table_assets(
             usd_file, sim_cfg["scene"]["cameras"]
         )
