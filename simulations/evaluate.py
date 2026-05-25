@@ -491,6 +491,9 @@ def simulate(env, obs_socket, act_socket, init_poses):
                 **{"observation.depths.%s" % k: v["depth"][..., 0]
                    for k, v in cam_view.items() if "depth" in v},
                 "camera_params": cam_params,
+                "object_pos":      curr_state["object"]["pos"].cpu().numpy(),
+                "object_quat":     curr_state["object"]["quat"].cpu().numpy(),
+                "object_velocity": curr_state["object"]["velocity"].cpu().numpy(),
             }
         )
 
