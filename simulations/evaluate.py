@@ -297,6 +297,23 @@ def get_latest_action(act_socket):
     return action
 
 
+def wait_for_action(act_socket, timeout_s=-1.0, poll_s=0.01):
+    """Block until an action message arrives.
+
+    Used by non-streaming / heavy-WM smoke tests so IsaacLab does not advance
+    while the client is still doing the first WorldModel init or a blocking
+    policy forward. Default evaluate.py behavior remains non-blocking.
+    """
+    t0 = time.perf_counter()
+    while True:
+        action = get_latest_action(act_socket)
+        if action is not None and "action" in action:
+            return action
+        if timeout_s is not None and timeout_s >= 0 and time.perf_counter() - t0 >= timeout_s:
+            return None
+        time.sleep(poll_s)
+
+
 def _get_action_tensor(action, num_envs, device):
     if isinstance(action, np.ndarray):
         action = torch.from_numpy(action).to(device)
@@ -442,7 +459,7 @@ def _save_server_ply(cam_view, curr_state, cam_params, step):
     lg.info("[PLY] merged  pts=%d  EE=(%.3f,%.3f,%.3f)" % (len(pts_m), ee[0],ee[1],ee[2]))
 
 
-def simulate(env, obs_socket, act_socket, init_poses):
+def simulate(env, obs_socket, act_socket, init_poses, execution_mode="streaming"):
     import configs.robot_cfg
     import configs.termination_cfg
 
@@ -497,16 +514,25 @@ def simulate(env, obs_socket, act_socket, init_poses):
             }
         )
 
-        action = get_latest_action(act_socket)
-        if action is not None and "action" in action:
+        action_msg = get_latest_action(act_socket)
+        should_wait_action = execution_mode == "non_streaming"
+        if (action_msg is None or "action" not in action_msg) and should_wait_action:
+            logging.info(
+                "Waiting for non-streaming VLA action before IsaacLab step..."
+            )
+            action_msg = wait_for_action(act_socket, timeout_s=-1.0)
+
+        action = None
+        if action_msg is not None and "action" in action_msg:
             action = _get_action_tensor(
-                action["action"], env.unwrapped.num_envs, env.unwrapped.device
+                action_msg["action"], env.unwrapped.num_envs, env.unwrapped.device
             )
             last_action = action
             rcv_action = True
 
         # If no action is received, use the previous action to make the
-        # simulation continuous
+        # simulation continuous. In non_streaming mode this fallback is reached
+        # only if wait_for_action returns unexpectedly.
         if last_action is None:
             robot_name = configs.robot_cfg.get_robot_name(
                 env.unwrapped.scene["robot"].cfg.spawn.usd_path
@@ -601,7 +627,13 @@ def get_sim_results(sim_cfg, env_cfg_file_path, obs_socket, act_socket):
 
     # Send the task instruction at the beginning of the simulation
     obs_socket.send_pyobj({"task": instruction})
-    sim_results = simulate(env, obs_socket, act_socket, sim_cfg["init_poses"])
+    sim_results = simulate(
+        env,
+        obs_socket,
+        act_socket,
+        sim_cfg["init_poses"],
+        execution_mode=sim_cfg.get("execution_mode", "streaming"),
+    )
     logging.info("Simulation finished with code: %d" % sim_results["status"])
     # Clear the action socket
     get_latest_action(act_socket)
@@ -657,6 +689,7 @@ def main(simulation_app, args):
         "disable_fabric": args.disable_fabric,
         "path_tracing": args.path_tracing,
         "init_poses": init_poses,
+        "execution_mode": "streaming",
     }
     while simulation_app.is_running():
         action = get_latest_action(act_socket)
@@ -667,6 +700,8 @@ def main(simulation_app, args):
             continue
 
         vla_name = action["vla"]
+        sim_cfg["execution_mode"] = action.get("execution_mode", "streaming")
+        logging.info("VLA execution_mode: %s", sim_cfg["execution_mode"])
         output_dir = os.path.join(args.output_dir, vla_name, "%04d" % action["epoch"])
         success_rates = {}
 
