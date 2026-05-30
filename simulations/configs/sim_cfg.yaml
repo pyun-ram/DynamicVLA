@@ -68,6 +68,7 @@ camera:
   data_types:
     - rgb
     - semantic_segmentation
+    - distance_to_image_plane
     # - depth
 
 lighting:  # lighting configuration, config for each scene is selected randomly in the respective range.

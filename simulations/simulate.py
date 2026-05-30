@@ -764,11 +764,46 @@ def get_camera_views(sensors, views=["rgb"]):
                 )
                 # Remove the original semantic segmentation (with New Key: "seg")
                 del cam_views[name]["semantic_segmentation"]
+            
+            if "distance_to_image_plane" in cam_views[name]:
+                cam_views[name]['depth'] = cam_views[name]['distance_to_image_plane']
+                del cam_views[name]['distance_to_image_plane']
 
             cam_views[name] = {k: v for k, v in cam_views[name].items() if k in views}
 
     return cam_views
 
+
+def get_camera_params(sensors):
+    def _to_numpy(value):
+        if isinstance(value, torch.Tensor):
+            return value.detach().cpu().numpy()
+        
+        return np.asarray(value)
+    cam_params = {}
+    for name, sensor in sensors.items():
+        if type(sensor).__name__ != "Camera":
+            continue
+
+        data = sensor.data
+        cam_params[name] = {}
+        for key, attrs in {
+            "K": ("intrinsic_matrices", "intrinsics"),
+            "pos_w": ("pos_w",),
+            "quat_w": ("quat_w_world", "quat_w"),
+        }.items():
+            value = None
+            for attr in attrs:
+                if hasattr(data, attr):
+                    value = getattr(data, attr)
+                    break
+            if value is None:
+                logging.warning("Camera %s has no %s field.", name, key)
+                continue
+
+            cam_params[name][key] = _to_numpy(value)
+    
+    return cam_params
 
 def _get_semantic_segmentation(rgba_seg_maps, semantic_tags):
     known_tags = helpers.get_semantic_tags()
@@ -852,6 +887,16 @@ def get_env_states(states, n_envs=1):
             if "cam_views" in es:
                 for cam, imgs in es["cam_views"].items():
                     for k, v in imgs.items():
+                        cam_key = "%s_%s" % (cam, k)
+                        if cam_key not in env_states[eid]:
+                            env_states[eid][cam_key] = []
+
+                        env_states[eid][cam_key].append(v[eid])
+            
+            # Camera intrinsics/extrinsics parameters
+            if "cam_params" in es:
+                for cam, params in es["cam_params"].items():
+                    for k, v in params.items():
                         cam_key = "%s_%s" % (cam, k)
                         if cam_key not in env_states[eid]:
                             env_states[eid][cam_key] = []
@@ -977,10 +1022,12 @@ def simulate(sim_cfg, task, robot, scene_dir, object_metadata, seed):
         cam_views = get_camera_views(
             env.unwrapped.scene.sensors, ["rgb", "depth", "seg"]
         )
+        cam_params = get_camera_params(env.unwrapped.scene.sensors)
         env.step(next_state["action"])
         env_states.append(
             {
                 "cam_views": cam_views,
+                "cam_params": cam_params,
                 "curr_state": curr_state,
                 "next_state": next_state,
                 "curr_obj_idx": curr_object_idx,
