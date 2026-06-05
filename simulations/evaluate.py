@@ -209,7 +209,7 @@ def _set_up_scene_cameras(scene_cfg, cfg):
                     "fps": 1 / v["update_period"],
                     "width": v["width"],
                     "height": v["height"],
-                    "data_types": v["data_types"],
+                    "data_types": list(v["data_types"]) + (["distance_to_image_plane"] if "distance_to_image_plane" not in v["data_types"] else []),
                     "focal_length": v["spawn"]["focal_length"],
                     "focus_distance": v["spawn"]["focus_distance"],
                     "horizontal_aperture": v["spawn"]["horizontal_aperture"],
@@ -300,7 +300,7 @@ def get_latest_action(act_socket):
 def _get_action_tensor(action, num_envs, device):
     if isinstance(action, np.ndarray):
         action = torch.from_numpy(action).to(device)
-    elif isinstance(action, torch.tensor):
+    elif isinstance(action, torch.Tensor):
         action = action.to(device)
     else:
         logging.warning("Unsupported action type: %s" % type(action))
@@ -314,8 +314,55 @@ def _get_action_tensor(action, num_envs, device):
 
     return action
 
+def wait_for_action(act_socket, timeout_s=-1.0, poll_s=0.01):
+    """Block until an action message arrives.
 
-def simulate(env, obs_socket, act_socket, init_poses):
+    Used by non-streaming / heavy-WM smoke tests so IsaacLab does not advance
+    while the client is still doing the first WorldModel init or a blocking
+    policy forward. Default evaluate.py behavior remains non-blocking.
+    """
+    t0 = time.perf_counter()
+    while True:
+        action = get_latest_action(act_socket)
+        if action is not None and "action" in action:
+            return action
+        if timeout_s is not None and timeout_s >= 0 and time.perf_counter() - t0 >= timeout_s:
+            return None
+        time.sleep(poll_s)
+
+def _get_cam_params_robot_frame(sensors, robot_quat_w, robot_pos_w):
+    # cam-to-robot-root extrinsics, same logic as convert_dynamicvla_to_physmani_raw.py
+    from scipy.spatial.transform import Rotation as R
+    # Maps camera optical frame to Isaac camera frame (from converter)
+    _OPTICAL_TO_ISAAC = np.array([[0., 0., 1.], [-1., 0., 0.], [0., -1., 0.]], dtype=np.float32)
+
+    q = robot_quat_w[[1, 2, 3, 0]]
+    R_rb = R.from_quat(q).as_matrix()
+    w2r = np.eye(4)
+    w2r[:3, :3] = R_rb.T
+    w2r[:3, 3]  = -R_rb.T @ robot_pos_w
+    raw = sim.get_camera_params(sensors)
+    cam_params = {}
+    for cam_name in ("opst_cam", "side_cam"):
+        if cam_name not in raw:
+            continue
+        K     = raw[cam_name]["K"][0]
+        pos_w = raw[cam_name]["pos_w"][0]
+        qw    = raw[cam_name]["quat_w"][0]
+        q_c   = qw[[1, 2, 3, 0]]
+        R_c   = R.from_quat(q_c).as_matrix()
+        c2w   = np.eye(4)
+        c2w[:3, :3] = R_c @ _OPTICAL_TO_ISAAC
+        c2w[:3, 3]  = pos_w
+        cam_params[cam_name] = {
+            "K":       K,
+            "E_robot": (w2r @ c2w).astype(np.float32),
+            "near":    0.01,
+            "far":     4.5,
+        }
+    return cam_params
+
+def simulate(env, obs_socket, act_socket, init_poses, execution_mode="streaming"):
     import configs.robot_cfg
     import configs.termination_cfg
 
@@ -327,9 +374,19 @@ def simulate(env, obs_socket, act_socket, init_poses):
     done_term = configs.termination_cfg.get_done_term(term_mgr.active_terms)
     tick = time.perf_counter()
     step_time = None
+    cam_params = _get_cam_params_robot_frame(
+        env.unwrapped.scene.sensors,
+        env.unwrapped.scene["robot"].data.root_quat_w[0].cpu().numpy(),
+        env.unwrapped.scene["robot"].data.root_pos_w[0].cpu().numpy(),
+    )
     while sim_results["status"] == -1:
         # scene_state = env.unwrapped.scene.state
-        cam_view = sim.get_camera_views(env.unwrapped.scene.sensors, ["rgb"])
+        cam_view = sim.get_camera_views(env.unwrapped.scene.sensors, ["rgb", "depth"])
+        # NOTE: gripper openness is intentionally NOT sent. The grasp is
+        # attach-based here, so finger-measured openness is a constant (always
+        # open) and carries no information. The client pads the proprio openness
+        # dim with INVALID (-100); the policy discards that dim anyway. The only
+        # valid openness signal is the predicted action's gripper command.
         curr_state = sim.get_curr_state(
             ee_state=env.unwrapped.scene["ee_frame"].data,
             # robot_joint_pos=scene_state["articulation"]["robot"]["joint_position"],
@@ -346,6 +403,7 @@ def simulate(env, obs_socket, act_socket, init_poses):
                     1.0 if step_time is None else max(1.0, step_time / env.env.step_dt)
                 ),
                 "index": len(sim_results["cam_views"]) - 1,
+                "frame_id": len(sim_results["cam_views"]) - 1,
                 "observation.state": {
                     "end_effector": {
                         k: v.cpu().numpy()
@@ -353,16 +411,33 @@ def simulate(env, obs_socket, act_socket, init_poses):
                     }
                 },
                 **{"observation.images.%s" % k: v["rgb"] for k, v in cam_view.items()},
+                **{"observation.depths.%s" % k: v["depth"][..., 0]
+                   for k, v in cam_view.items() if "depth" in v},
+                "camera_params": cam_params,
+                "object_pos":      curr_state["object"]["pos"].cpu().numpy(),
+                "object_quat":     curr_state["object"]["quat"].cpu().numpy(),
+                "object_velocity": curr_state["object"]["velocity"].cpu().numpy(),
             }
         )
 
-        action = get_latest_action(act_socket)
-        if action is not None and "action" in action:
-            action = _get_action_tensor(
-                action["action"], env.unwrapped.num_envs, env.unwrapped.device
+        action_msg = get_latest_action(act_socket)
+        should_wait_action = execution_mode == "non_streaming"
+        if (action_msg is None or "action" not in action_msg) and should_wait_action:
+            logging.info(
+                "Waiting for non-streaming VLA action before IsaacLab step..."
             )
-            last_action = action
-            rcv_action = True
+            action_msg = wait_for_action(act_socket, timeout_s=-1.0)
+
+        action = None
+        step_action_kind = "old_action"
+        if action_msg is not None and "action" in action_msg:
+            action = _get_action_tensor(
+                action_msg["action"], env.unwrapped.num_envs, env.unwrapped.device
+            )
+            if action is not None:
+                last_action = action
+                rcv_action = True
+                step_action_kind = "new_action"
 
         # If no action is received, use the previous action to make the
         # simulation continuous
@@ -371,6 +446,7 @@ def simulate(env, obs_socket, act_socket, init_poses):
                 env.unwrapped.scene["robot"].cfg.spawn.usd_path
             )
             last_action = init_poses[robot_name].repeat(env.unwrapped.num_envs, 1)
+            step_action_kind = "init_pose"
 
         env.step(last_action)
         step_time = time.perf_counter() - tick
@@ -379,13 +455,16 @@ def simulate(env, obs_socket, act_socket, init_poses):
             time.sleep(env.env.step_dt - step_time)
 
         tick = time.perf_counter()
+        applied = last_action if isinstance(last_action, torch.Tensor) else None
+        step_idx = len(sim_results["cam_views"]) - 1
         logging.debug(
-            "[Step%03d] Time: %.4fs; Scale: %.2f. Action shape: %s"
+            "[Step%03d] Time: %.4fs; Scale: %.2f. Action shape: %s. env.step_action: %s"
             % (
-                len(sim_results["cam_views"]) - 1,
+                step_idx,
                 step_time,
                 step_time / env.env.step_dt,
-                (action.shape if isinstance(action, torch.Tensor) else None),
+                applied.shape if applied is not None else None,
+                step_action_kind,
             )
         )
         if term_mgr.get_term(done_term).all():
@@ -458,9 +537,14 @@ def get_sim_results(sim_cfg, env_cfg_file_path, obs_socket, act_socket):
     torch.manual_seed(env_cfg["seed"])
     env.reset(seed=env_cfg["seed"])
 
-    # Send the task instruction at the beginning of the simulation
-    obs_socket.send_pyobj({"task": instruction})
-    sim_results = simulate(env, obs_socket, act_socket, sim_cfg["init_poses"])
+    # Send only the natural-language instruction at the beginning.
+    obs_socket.send_pyobj(
+        {
+            "instruction": instruction,
+        }
+    )
+    sim_results = simulate(env, obs_socket, act_socket, sim_cfg["init_poses"],
+        sim_cfg["execution_mode"])
     logging.info("Simulation finished with code: %d" % sim_results["status"])
     # Clear the action socket
     get_latest_action(act_socket)
@@ -516,6 +600,7 @@ def main(simulation_app, args):
         "disable_fabric": args.disable_fabric,
         "path_tracing": args.path_tracing,
         "init_poses": init_poses,
+        "execution_mode": args.execution_mode,
     }
     while simulation_app.is_running():
         action = get_latest_action(act_socket)
@@ -526,6 +611,7 @@ def main(simulation_app, args):
             continue
 
         vla_name = action["vla"]
+        logging.info("Execution mode: %s" % sim_cfg["execution_mode"])
         output_dir = os.path.join(args.output_dir, vla_name, "%04d" % action["epoch"])
         success_rates = {}
 
@@ -656,6 +742,15 @@ if __name__ == "__main__":
         default=os.path.join(PROJECT_HOME, "simulations", "configs", "sim_cfg.yaml"),
     )
     parser.add_argument("--env_cfg", required=True)
+    parser.add_argument(
+        "--execution_mode",
+        default="streaming",
+        choices=["streaming", "non_streaming"],
+        help="Simulator execution mode: 'streaming' (IsaacLab steps without waiting, "
+             "e.g. DynamicVLA/3DFA) or 'non_streaming' (wait for policy action before "
+             "each step, e.g. PhysMani with WM). Can be overridden per-connection via "
+             "the VLA handshake message.",
+    )
     args = parser.parse_args(script_args)
     # Copy the shared parameters from isaaclab_args to args
     for sp in SHARED_PARAMETERS:

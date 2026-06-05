@@ -688,6 +688,12 @@ def get_curr_state(
                 ee_state.target_quat_w[..., 0, :], robot_quat
             ),
         }
+        # NOTE: gripper openness is intentionally NOT collected here. In this
+        # simulator the grasp is attach-based, so the finger joints never close
+        # and any "measured" openness would be a constant (always open),
+        # carrying no information. The only valid openness signal lives in the
+        # desired action / trajectory target (action[..., -1]); proprio openness
+        # is downstream marked INVALID (-100) and discarded by the policy.
     if robot_joint_pos is not None:
         curr_state["joints"] = robot_joint_pos
     if object_state is not None:
